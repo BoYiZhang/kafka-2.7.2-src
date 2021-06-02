@@ -335,6 +335,8 @@ public class Sender implements Runnable {
     private long sendProducerData(long now) {
         Cluster cluster = metadata.fetch();
         // get the list of partitions with data ready to send
+
+        // 判断哪些 分区有消息发送
         RecordAccumulator.ReadyCheckResult result = this.accumulator.ready(cluster, now);
 
         // if there are any partitions whose leaders are not known yet, force metadata update
@@ -350,6 +352,7 @@ public class Sender implements Runnable {
             this.metadata.requestUpdate();
         }
 
+        //
         // remove any nodes we aren't ready to send to
         Iterator<Node> iter = result.readyNodes.iterator();
         long notReadyTimeout = Long.MAX_VALUE;
@@ -362,6 +365,7 @@ public class Sender implements Runnable {
         }
 
         // create produce requests
+        // node id  -> 要发送的请求...
         Map<Integer, List<ProducerBatch>> batches = this.accumulator.drain(cluster, result.readyNodes, this.maxRequestSize, now);
         addToInflightBatches(batches);
         if (guaranteeMessageOrder) {
@@ -741,6 +745,7 @@ public class Sender implements Runnable {
                 minUsedMagic = batch.magic();
         }
 
+        // 获取 ProducerBatch
         for (ProducerBatch batch : batches) {
             TopicPartition tp = batch.topicPartition;
             MemoryRecords records = batch.records();

@@ -121,24 +121,36 @@ public class BufferPool {
 
         try {
             // check if we have a free buffer of the right size pooled
+            // 如果空闲队列内有空闲的内存, 返回..
             if (size == poolableSize && !this.free.isEmpty())
                 return this.free.pollFirst();
 
             // now check if the request is immediately satisfiable with the
             // memory on hand or if we need to block
+
+            // 内存的个数 * 频次的大小 = free的大小...
             int freeListSize = freeSize() * this.poolableSize;
             if (this.nonPooledAvailableMemory + freeListSize >= size) {
                 // we have enough unallocated or pooled memory to immediately
                 // satisfy the request, but need to allocate the buffer
+
+                // 直接分配内存...
                 freeUp(size);
                 this.nonPooledAvailableMemory -= size;
             } else {
+                // 内存不足, 开始阻塞操作..
+
                 // we are out of memory and will have to block
                 int accumulated = 0;
+
+                // 获取条件..
                 Condition moreMemory = this.lock.newCondition();
                 try {
+
+                    // 加入队列...
                     long remainingTimeToBlockNs = TimeUnit.MILLISECONDS.toNanos(maxTimeToBlockMs);
                     this.waiters.addLast(moreMemory);
+
                     // loop over and over until we have a buffer or have reserved
                     // enough memory to allocate one
                     while (accumulated < size) {
@@ -146,6 +158,7 @@ public class BufferPool {
                         long timeNs;
                         boolean waitingTimeElapsed;
                         try {
+                            // 等待 内存
                             waitingTimeElapsed = !moreMemory.await(remainingTimeToBlockNs, TimeUnit.NANOSECONDS);
                         } finally {
                             long endWaitNs = time.nanoseconds();
@@ -167,12 +180,15 @@ public class BufferPool {
                         // otherwise allocate memory
                         if (accumulated == 0 && size == this.poolableSize && !this.free.isEmpty()) {
                             // just grab a buffer from the free list
+                            // 返回队列中的资源...
                             buffer = this.free.pollFirst();
                             accumulated = size;
                         } else {
                             // we'll need to allocate memory, but we may only get
                             // part of what we need on this iteration
                             freeUp(size - accumulated);
+
+                            // 可以分配的内存
                             int got = (int) Math.min(size - accumulated, this.nonPooledAvailableMemory);
                             this.nonPooledAvailableMemory -= got;
                             accumulated += got;
@@ -199,6 +215,7 @@ public class BufferPool {
         }
 
         if (buffer == null)
+            // 使用堆内内存...
             return safeAllocateByteBuffer(size);
         else
             return buffer;
@@ -258,10 +275,14 @@ public class BufferPool {
     public void deallocate(ByteBuffer buffer, int size) {
         lock.lock();
         try {
+            // 如果是默认 16k大小的 加入缓存.
             if (size == this.poolableSize && size == buffer.capacity()) {
+                // 清理数据
                 buffer.clear();
+                // 释放内存
                 this.free.add(buffer);
             } else {
+                // 如果不是默认的16k内存 , 等待jvm 回收即可...
                 this.nonPooledAvailableMemory += size;
             }
             Condition moreMem = this.waiters.peekFirst();
