@@ -394,6 +394,7 @@ public class KafkaChannel implements AutoCloseable {
             receive = new NetworkReceive(maxReceiveSize, id, memoryPool);
         }
 
+        // 读取数据..
         long bytesReceived = receive(this.receive);
 
         if (this.receive.requiredMemoryAmountKnown() && !this.receive.memoryAllocated() && isInMutableState()) {
@@ -444,6 +445,7 @@ public class KafkaChannel implements AutoCloseable {
 
     private long receive(NetworkReceive receive) throws IOException {
         try {
+            // 读取数据..
             return receive.readFrom(transportLayer);
         } catch (SslAuthenticationException e) {
             // With TLSv1.3, post-handshake messages may throw SSLExceptions, which are
