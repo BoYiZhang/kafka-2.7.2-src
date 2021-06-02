@@ -35,16 +35,37 @@ import java.util.Set;
 public final class Cluster {
 
     private final boolean isBootstrapConfigured;
+
+    // 所有的 broker信息
     private final List<Node> nodes;
+
     private final Set<String> unauthorizedTopics;
+
+    // 无效的topic
     private final Set<String> invalidTopics;
+
+    // 内部的topic
     private final Set<String> internalTopics;
+
+    //  controller...
     private final Node controller;
+
+    // TopicPartition -> PartitionInfo
     private final Map<TopicPartition, PartitionInfo> partitionsByTopicPartition;
+
+    // topic -> PartitionInfo [多]
     private final Map<String, List<PartitionInfo>> partitionsByTopic;
+
+    // 一个topic对应的可用的 PartitionInfo
     private final Map<String, List<PartitionInfo>> availablePartitionsByTopic;
+
+    // 一台服务器上有哪些partition 信息 (服务器用的服务器编号)
     private final Map<Integer, List<PartitionInfo>> partitionsByNode;
+
+    // node ID -> Node 信息
     private final Map<Integer, Node> nodesById;
+
+    // 集群的资源
     private final ClusterResource clusterResource;
 
     /**

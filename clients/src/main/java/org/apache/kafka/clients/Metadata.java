@@ -59,20 +59,50 @@ import static org.apache.kafka.common.record.RecordBatch.NO_PARTITION_LEADER_EPO
  */
 public class Metadata implements Closeable {
     private final Logger log;
+
+    //两个更新元数据的请求的最小的时间间隔, 默认值是100ms
     private final long refreshBackoffMs;
+
+    //多久更新一次元数据, 默认时间5min
     private final long metadataExpireMs;
+
+    // 更新的版本
     private int updateVersion;  // bumped on every metadata response
+
+    // 请求的版本
     private int requestVersion; // bumped on every new topic addition
+
+    // 上一次的刷新时间
     private long lastRefreshMs;
+
+    // 上次刷新成功的时间
     private long lastSuccessfulRefreshMs;
+
+    // 异常相关
     private KafkaException fatalException;
+
+    // 无效的topic
     private Set<String> invalidTopics;
+
+    // 为授权的topic
     private Set<String> unauthorizedTopics;
+
+    // 元数据缓存...
     private MetadataCache cache = MetadataCache.empty();
+
+    // 是否要全量更新
     private boolean needFullUpdate;
+
+    // 是否需要更新分区
     private boolean needPartialUpdate;
+
+    // 集群资源监听器
     private final ClusterResourceListeners clusterResourceListeners;
+
+    // 是否关闭
     private boolean isClosed;
+
+    // 分区leader的 版 本号
     private final Map<TopicPartition, Integer> lastSeenLeaderEpochs;
 
     /**
@@ -256,7 +286,7 @@ public class Metadata implements Closeable {
         Objects.requireNonNull(response, "Metadata response cannot be null");
         if (isClosed())
             throw new IllegalStateException("Update requested after metadata close");
-
+        // 是否要更新分区
         this.needPartialUpdate = requestVersion < this.requestVersion;
         this.lastRefreshMs = nowMs;
         this.updateVersion += 1;
@@ -265,9 +295,12 @@ public class Metadata implements Closeable {
             this.lastSuccessfulRefreshMs = nowMs;
         }
 
+        // 获取之前的ClusterId
         String previousClusterId = cache.clusterResource().clusterId();
 
+        // 更新缓存中的元数据信息..
         this.cache = handleMetadataResponse(response, isPartialUpdate, nowMs);
+
 
         Cluster cluster = cache.cluster();
         maybeSetMetadataError(cluster);

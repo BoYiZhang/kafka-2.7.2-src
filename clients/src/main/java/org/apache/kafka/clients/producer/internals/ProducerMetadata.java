@@ -37,9 +37,13 @@ public class ProducerMetadata extends Metadata {
     private final long metadataIdleMs;
 
     /* Topics with expiry time */
+    // topic 的过期时间
     private final Map<String, Long> topics = new HashMap<>();
+
+    // 新的topic ?
     private final Set<String> newTopics = new HashSet<>();
     private final Logger log;
+    // 定时器相关
     private final Time time;
 
     public ProducerMetadata(long refreshBackoffMs,
@@ -119,6 +123,8 @@ public class ProducerMetadata extends Metadata {
         time.waitObject(this, () -> {
             // Throw fatal exceptions, if there are any. Recoverable topic errors will be handled by the caller.
             maybeThrowFatalException();
+
+            // 更新后的版本号是否大于 上一次更新的版本号
             return updateVersion() > lastVersion || isClosed();
         }, deadlineMs);
 

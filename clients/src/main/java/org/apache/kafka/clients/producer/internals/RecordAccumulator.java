@@ -77,6 +77,8 @@ public final class RecordAccumulator {
     private final BufferPool free;
     private final Time time;
     private final ApiVersions apiVersions;
+
+    //  ?? CopyOnWriteMap
     private final ConcurrentMap<TopicPartition, Deque<ProducerBatch>> batches;
     private final IncompleteBatches incomplete;
     // The following variables are only accessed by the sender thread, so we don't need to protect them.
@@ -124,6 +126,11 @@ public final class RecordAccumulator {
         this.lingerMs = lingerMs;
         this.retryBackoffMs = retryBackoffMs;
         this.deliveryTimeoutMs = deliveryTimeoutMs;
+
+        // CopyOnWriteMap
+        //
+        // 读 没有加锁,
+        // 写的话, 复制了一个新的map, 然后向新的map写入数据 , 然后用新的map替换掉旧的map.
         this.batches = new CopyOnWriteMap<>();
         this.free = bufferPool;
         this.incomplete = new IncompleteBatches();
@@ -193,10 +200,13 @@ public final class RecordAccumulator {
         if (headers == null) headers = Record.EMPTY_HEADERS;
         try {
             // check if we have an in-progress batch
+            // 获取 or 构造 ArrayDeque
+            // 每一个分区都有一个 队列 ArrayDeque<ProducerBatch>
             Deque<ProducerBatch> dq = getOrCreateDeque(tp);
             synchronized (dq) {
                 if (closed)
                     throw new KafkaException("Producer closed while send in progress");
+                // 尝试添加数据...
                 RecordAppendResult appendResult = tryAppend(timestamp, key, value, headers, callback, dq, nowMs);
                 if (appendResult != null)
                     return appendResult;
@@ -209,8 +219,15 @@ public final class RecordAccumulator {
             }
 
             byte maxUsableMagic = apiVersions.maxUsableProduceMagic();
+
+
+            // 默认 16k .  根据数据和默认的16k取一个最大值...
+            // 如果数据超过16k的话, 那么数据就是一条一条的发送的...
+            // 尽量控制一下发送数据的大小
             int size = Math.max(this.batchSize, AbstractRecords.estimateSizeInBytesUpperBound(maxUsableMagic, compression, key, value, headers));
             log.trace("Allocating a new {} byte message buffer for topic {} partition {} with remaining timeout {}ms", size, tp.topic(), tp.partition(), maxTimeToBlock);
+
+            // 申请内存... , 默认16k
             buffer = free.allocate(size, maxTimeToBlock);
 
             // Update the current time in case the buffer allocation blocked above.
@@ -220,17 +237,24 @@ public final class RecordAccumulator {
                 if (closed)
                     throw new KafkaException("Producer closed while send in progress");
 
+                // 尝试写入队列...
                 RecordAppendResult appendResult = tryAppend(timestamp, key, value, headers, callback, dq, nowMs);
                 if (appendResult != null) {
                     // Somebody else found us a batch, return the one we waited for! Hopefully this doesn't happen often...
                     return appendResult;
                 }
 
+                // 封装数据..
                 MemoryRecordsBuilder recordsBuilder = recordsBuilder(buffer, maxUsableMagic);
+
+                // 封装数据..
                 ProducerBatch batch = new ProducerBatch(tp, recordsBuilder, nowMs);
+
+                // 尝试发送数据..
                 FutureRecordMetadata future = Objects.requireNonNull(batch.tryAppend(timestamp, key, value, headers,
                         callback, nowMs));
 
+                // 队列中添加数据..
                 dq.addLast(batch);
                 incomplete.add(batch);
 
@@ -648,10 +672,19 @@ public final class RecordAccumulator {
      * Get the deque for the given topic-partition, creating it if necessary.
      */
     private Deque<ProducerBatch> getOrCreateDeque(TopicPartition tp) {
+
+        // 获取队列
         Deque<ProducerBatch> d = this.batches.get(tp);
         if (d != null)
             return d;
+        // 构建新的ArrayDeque
         d = new ArrayDeque<>();
+
+        // 存入缓存数据.
+        // ProducerBatch 写少, 读多...
+        // 因为写的是 Deque<ProducerBatch> 队列...
+        // 比如一个topic有三个分区 写入10000次,
+        //      那么写操作只有3次. 但是读取10000次.
         Deque<ProducerBatch> previous = this.batches.putIfAbsent(tp, d);
         if (previous == null)
             return d;

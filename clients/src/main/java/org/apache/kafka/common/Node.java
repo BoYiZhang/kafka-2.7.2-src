@@ -25,12 +25,22 @@ public class Node {
 
     private static final Node NO_NODE = new Node(-1, "", -1);
 
+    // id
     private final int id;
+
+    // id 的字符串类型
     private final String idString;
+
+    // 主机名
     private final String host;
+
+    // 端口
     private final int port;
+
+    // 机架
     private final String rack;
 
+    // hash值...
     // Cache hashCode as it is called in performance sensitive parts of the code (e.g. RecordAccumulator.ready)
     private Integer hash;
 

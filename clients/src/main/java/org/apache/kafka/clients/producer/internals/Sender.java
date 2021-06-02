@@ -293,10 +293,13 @@ public class Sender implements Runnable {
      *
      */
     void runOnce() {
+
+        // 事务相关
         if (transactionManager != null) {
             try {
                 transactionManager.maybeResolveSequences();
 
+                // 如果事务管理器处于失败状态，请不要继续发送
                 // do not continue sending if the transaction manager is in a failed state
                 if (transactionManager.hasFatalError()) {
                     RuntimeException lastError = transactionManager.lastError();
@@ -306,6 +309,8 @@ public class Sender implements Runnable {
                     return;
                 }
 
+                // 检查一下我们是否需要一个新的生产商。
+                // 如果是这样，我们将在下面发送一个InitProducerId请求
                 // Check whether we need a new producerId. If so, we will enqueue an InitProducerId
                 // request which will be sent below
                 transactionManager.bumpIdempotentEpochAndResetIdIfNeeded();
@@ -321,6 +326,8 @@ public class Sender implements Runnable {
         }
 
         long currentTimeMs = time.milliseconds();
+
+        // 发送 producer的数据...
         long pollTimeout = sendProducerData(currentTimeMs);
         client.poll(pollTimeout, currentTimeMs);
     }
@@ -365,6 +372,7 @@ public class Sender implements Runnable {
             }
         }
 
+        // 重置 下一批次的数据发送过期时间...
         accumulator.resetNextBatchExpiryTime();
         List<ProducerBatch> expiredInflightBatches = getExpiredInflightBatches(now);
         List<ProducerBatch> expiredBatches = this.accumulator.expiredBatches(now);
@@ -402,6 +410,8 @@ public class Sender implements Runnable {
             // otherwise the select time will be the time difference between now and the metadata expiry time;
             pollTimeout = 0;
         }
+
+        // 发送请求...
         sendProduceRequests(batches, now);
         return pollTimeout;
     }

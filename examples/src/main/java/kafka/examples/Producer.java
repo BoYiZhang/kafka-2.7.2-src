@@ -43,18 +43,27 @@ public class Producer extends Thread {
                     final int transactionTimeoutMs,
                     final CountDownLatch latch) {
         Properties props = new Properties();
+
+        // 设置连接信息
         props.put(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG, KafkaProperties.KAFKA_SERVER_URL + ":" + KafkaProperties.KAFKA_SERVER_PORT);
         props.put(ProducerConfig.CLIENT_ID_CONFIG, "DemoProducer");
+
+        // 设置序列化
         props.put(ProducerConfig.KEY_SERIALIZER_CLASS_CONFIG, IntegerSerializer.class.getName());
         props.put(ProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG, StringSerializer.class.getName());
+
+
+        // 事务超时时间
         if (transactionTimeoutMs > 0) {
             props.put(ProducerConfig.TRANSACTION_TIMEOUT_CONFIG, transactionTimeoutMs);
         }
+        // 设置transactionalId
         if (transactionalId != null) {
             props.put(ProducerConfig.TRANSACTIONAL_ID_CONFIG, transactionalId);
         }
         props.put(ProducerConfig.ENABLE_IDEMPOTENCE_CONFIG, enableIdempotency);
 
+        // 构造 Producer
         producer = new KafkaProducer<>(props);
         this.topic = topic;
         this.isAsync = isAsync;
@@ -73,11 +82,16 @@ public class Producer extends Thread {
         while (recordsSent < numRecords) {
             String messageStr = "Message_" + messageKey;
             long startTime = System.currentTimeMillis();
-            if (isAsync) { // Send asynchronously
+            if (isAsync) {
+                // 异步发送
+                // DemoCallBack 回调函数.
+                // Send asynchronously
                 producer.send(new ProducerRecord<>(topic,
                     messageKey,
                     messageStr), new DemoCallBack(startTime, messageKey, messageStr));
-            } else { // Send synchronously
+            } else {
+                // 同步发送...
+                // Send synchronously
                 try {
                     producer.send(new ProducerRecord<>(topic,
                         messageKey,

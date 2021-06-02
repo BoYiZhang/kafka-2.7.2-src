@@ -42,14 +42,27 @@ import java.util.stream.Collectors;
  * instance which is optimized for read access.
  */
 public class MetadataCache {
+
+    // 集群的id
     private final String clusterId;
+
+    // broker 服务器
     private final Map<Integer, Node> nodes;
+
+    // 未认证的topic
     private final Set<String> unauthorizedTopics;
+    // 无效的topic
     private final Set<String> invalidTopics;
+    // 内部的topic
     private final Set<String> internalTopics;
+
+    // controller broker节点的信息
     private final Node controller;
+
+    // 分区和 分区的元数据信息
     private final Map<TopicPartition, PartitionMetadata> metadataByPartition;
 
+    // Cluster的实例信息
     private Cluster clusterInstance;
 
     MetadataCache(String clusterId,

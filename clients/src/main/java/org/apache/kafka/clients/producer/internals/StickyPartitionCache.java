@@ -36,28 +36,43 @@ public class StickyPartitionCache {
     }
 
     public int partition(String topic, Cluster cluster) {
+        // 从缓存中获取分区..
         Integer part = indexCache.get(topic);
         if (part == null) {
+            // 获取下一个分区...
             return nextPartition(topic, cluster, -1);
         }
         return part;
     }
 
     public int nextPartition(String topic, Cluster cluster, int prevPartition) {
+
+        // 获取 topic的所有分区.
         List<PartitionInfo> partitions = cluster.partitionsForTopic(topic);
+
+        // 湖获取的老的分区..
         Integer oldPart = indexCache.get(topic);
         Integer newPart = oldPart;
         // Check that the current sticky partition for the topic is either not set or that the partition that 
         // triggered the new batch matches the sticky partition that needs to be changed.
+
+        // 检查topic的当前粘性分区是否未设置，或者触发新批处理的分区是否与需要更改的粘性分区匹配。
         if (oldPart == null || oldPart == prevPartition) {
+
+            // 获取 topic可用的分区
             List<PartitionInfo> availablePartitions = cluster.availablePartitionsForTopic(topic);
+            // 如果可用的分区数小于1
             if (availablePartitions.size() < 1) {
+                // 可用分区小于 1 ??
+                // 随机 数 & 分区 数量取余
                 Integer random = Utils.toPositive(ThreadLocalRandom.current().nextInt());
                 newPart = random % partitions.size();
             } else if (availablePartitions.size() == 1) {
+                // 如果只有一个分区,则就用跟着一个分区...
                 newPart = availablePartitions.get(0).partition();
             } else {
                 while (newPart == null || newPart.equals(oldPart)) {
+                    // 随机 数 & 分区数量取余
                     Integer random = Utils.toPositive(ThreadLocalRandom.current().nextInt());
                     newPart = availablePartitions.get(random % availablePartitions.size()).partition();
                 }

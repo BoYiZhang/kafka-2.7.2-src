@@ -82,9 +82,13 @@ public class NetworkClient implements KafkaClient {
 
     private final Logger log;
 
-    /* the selector used to perform network i/o */
+    /*
+     * selector的转发..
+     * the selector used to perform network i/o
+    */
     private final Selectable selector;
 
+    // 元数据的更新
     private final MetadataUpdater metadataUpdater;
 
     private final Random randOffset;
@@ -167,6 +171,26 @@ public class NetworkClient implements KafkaClient {
              logContext);
     }
 
+    /**
+     *
+     * @param selector
+     * @param metadata
+     * @param clientId
+     * @param maxInFlightRequestsPerConnection
+     * @param reconnectBackoffMs
+     * @param reconnectBackoffMax
+     * @param socketSendBuffer
+     * @param socketReceiveBuffer
+     * @param defaultRequestTimeoutMs
+     * @param connectionSetupTimeoutMs
+     * @param connectionSetupTimeoutMaxMs
+     * @param clientDnsLookup
+     * @param time
+     * @param discoverBrokerVersions
+     * @param apiVersions
+     * @param throttleTimeSensor
+     * @param logContext
+     */
     public NetworkClient(Selectable selector,
                          Metadata metadata,
                          String clientId,
@@ -272,6 +296,8 @@ public class NetworkClient implements KafkaClient {
         } else {
             this.metadataUpdater = metadataUpdater;
         }
+
+        // selector
         this.selector = selector;
         this.clientId = clientId;
         this.inFlightRequests = new InFlightRequests(maxInFlightRequestsPerConnection);
@@ -558,8 +584,15 @@ public class NetworkClient implements KafkaClient {
             return responses;
         }
 
+        // 更新元数据 ???
+
         long metadataTimeout = metadataUpdater.maybeUpdate(now);
+
+
+
         try {
+
+
             this.selector.poll(Utils.min(timeout, metadataTimeout, defaultRequestTimeoutMs));
         } catch (IOException e) {
             log.error("Unexpected error during I/O", e);
@@ -569,12 +602,22 @@ public class NetworkClient implements KafkaClient {
         long updatedNow = this.time.milliseconds();
         List<ClientResponse> responses = new ArrayList<>();
         handleCompletedSends(responses, updatedNow);
+
+        // 处理收到的响应
         handleCompletedReceives(responses, updatedNow);
+
+
         handleDisconnections(responses, updatedNow);
+
         handleConnections();
+
         handleInitiateApiVersionRequests(updatedNow);
+
+        // 处理连接超时的node 操作...
         handleTimedOutConnections(responses, updatedNow);
+
         handleTimedOutRequests(responses, updatedNow);
+
         completeResponses(responses);
 
         return responses;
@@ -890,6 +933,7 @@ public class NetworkClient implements KafkaClient {
             // If the received response includes a throttle delay, throttle the connection.
             maybeThrottle(response, req.header.apiVersion(), req.destination, now);
             if (req.isInternalRequest && response instanceof MetadataResponse)
+                // 更新元数据  ...
                 metadataUpdater.handleSuccessfulResponse(req.header, now, (MetadataResponse) response);
             else if (req.isInternalRequest && response instanceof ApiVersionsResponse)
                 handleApiVersionsResponse(responses, req, now, (ApiVersionsResponse) response);
@@ -1102,6 +1146,8 @@ public class NetworkClient implements KafkaClient {
             // If any partition has leader with missing listeners, log up to ten of these partitions
             // for diagnosing broker configuration issues.
             // This could be a transient issue if listeners were added dynamically to brokers.
+
+            // 处理  missingListenerPartitions
             List<TopicPartition> missingListenerPartitions = response.topicMetadata().stream().flatMap(topicMetadata ->
                 topicMetadata.partitionMetadata().stream()
                     .filter(partitionMetadata -> partitionMetadata.error == Errors.LISTENER_NOT_FOUND)
@@ -1124,6 +1170,7 @@ public class NetworkClient implements KafkaClient {
                 log.trace("Ignoring empty metadata response with correlation id {}.", requestHeader.correlationId());
                 this.metadata.failedUpdate(now);
             } else {
+                // 更新元数据...
                 this.metadata.update(inProgress.requestVersion, response, inProgress.isPartialUpdate, now);
             }
 
@@ -1155,6 +1202,8 @@ public class NetworkClient implements KafkaClient {
 
             if (canSendRequest(nodeConnectionId, now)) {
                 Metadata.MetadataRequestAndVersion requestAndVersion = metadata.newMetadataRequestAndVersion(now);
+
+                // 构建 MetadataRequest 请求...
                 MetadataRequest.Builder metadataRequest = requestAndVersion.requestBuilder;
                 log.debug("Sending metadata request {} to node {}", metadataRequest, node);
                 sendInternalMetadataRequest(metadataRequest, nodeConnectionId, now);

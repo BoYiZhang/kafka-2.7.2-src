@@ -28,6 +28,7 @@ import java.util.concurrent.ConcurrentMap;
  */
 public class CopyOnWriteMap<K, V> implements ConcurrentMap<K, V> {
 
+    // volatile 线程可见
     private volatile Map<K, V> map;
 
     public CopyOnWriteMap() {
@@ -53,6 +54,7 @@ public class CopyOnWriteMap<K, V> implements ConcurrentMap<K, V> {
         return map.entrySet();
     }
 
+    // get 没有加锁...
     @Override
     public V get(Object k) {
         return map.get(k);
@@ -83,10 +85,15 @@ public class CopyOnWriteMap<K, V> implements ConcurrentMap<K, V> {
         this.map = Collections.emptyMap();
     }
 
+    // 加了 synchronized
     @Override
     public synchronized V put(K k, V v) {
+        // 复制一份数据..
         Map<K, V> copy = new HashMap<K, V>(this.map);
+        // 写数据.
         V prev = copy.put(k, v);
+
+        // 将数据写入后的 map 更新地址..
         this.map = Collections.unmodifiableMap(copy);
         return prev;
     }
