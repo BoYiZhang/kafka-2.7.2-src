@@ -44,6 +44,7 @@ import scala.collection.mutable
 import scala.jdk.CollectionConverters._
 import scala.reflect.ClassTag
 
+// 本质: 一个不断接收外部请求、处理请求，然后发送处理结果的 Java 进程。
 object RequestChannel extends Logging {
   private val requestLogger = Logger("kafka.request.logger")
 
@@ -53,7 +54,9 @@ object RequestChannel extends Logging {
 
   def isRequestLoggingEnabled: Boolean = requestLogger.underlying.isDebugEnabled
 
+  // Scala 语言中的“trait”关键字，大致类似于 Java 中的 interface（接口）
   sealed trait BaseRequest
+
   case object ShutdownRequest extends BaseRequest
 
   case class Session(principal: KafkaPrincipal, clientAddress: InetAddress) {
@@ -76,6 +79,52 @@ object RequestChannel extends Logging {
     }
   }
 
+
+  /**
+   *
+   *
+   * @param processor
+   *    processor 是 Processor 线程的序号，即这个请求是由哪个 Processor 线程接收处理的。
+   *    Broker 端参数 num.network.threads 控制了 Broker 每个监听器上创建的 Processor 线程数。
+   *
+   *    为什么要保存 Processor 线程序号呢？
+   *        这是因为，当 Request 被后面的 I/O线程处理完成后，
+   *        还要依靠 Processor 线程发送 Response 给请求发送方，
+   *        因此，Request 中必须记录它之前是被哪个 Processor 线程接收的。
+   *
+   *        另外，这里我们要先明确一点：Processor 线程仅仅是网络接收线程，
+   *        不会执行真正的 Request 请求处理逻辑，那是I/O 线程负责的事情
+   *
+   *
+   *        在默认情况下，Broker 启动时会创建 6 个 Processor 线程，每 3 个为一组，
+   *        分别给listeners 参数中设置的两个监听器使用，每组的序号分别是 0、1、2。
+   *
+   *
+   * @param context
+   *        context 是用来标识请求上下文信息的。
+   *
+   * @param startTimeNanos
+   *        记录了 Request 对象被创建的时间，主要用于各种时间统计指标的计算
+   *        它是以纳秒为单位的时间戳信息，可以实现非常细粒度的时间统计精度
+   *
+   *
+   * @param memoryPool
+   *        memoryPool 表示源码定义的一个非阻塞式的内存缓冲区，主要作用是避免 Request 对象无限使用内存
+
+   *        实现类 : SimpleMemoryPool  使用堆内内存  ByteBuffer
+   *
+   *
+   * @param buffer
+   *        buffer 是真正保存 Request 对象内容的字节缓冲区。
+   *        Request 发送方必须按照 Kafka RPC协议规定的格式向该缓冲区写入字节，
+   *        否则将抛出 InvalidRequestException 异常。
+   *        这个逻辑主要是由 RequestContext 的 parseRequest 方法实现的
+   *
+   * @param metrics
+   *        metrics 是 Request 相关的各种监控指标的一个管理类。
+   *        它里面构建了一个 Map，封装了所有的请求 JMX 指标。
+   *
+   */
   class Request(val processor: Int,
                 val context: RequestContext,
                 val startTimeNanos: Long,
@@ -94,6 +143,8 @@ object RequestChannel extends Logging {
     @volatile var recordNetworkThreadTimeCallback: Option[Long => Unit] = None
 
     val session = Session(context.principal, context.clientAddress)
+
+    // 解析后的请求实体 [ 信息和长度 ]
     private val bodyAndSize: RequestAndSize = context.parseRequest(buffer)
 
     def header: RequestHeader = context.header
