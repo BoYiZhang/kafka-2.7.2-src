@@ -1,4 +1,10 @@
 /*
+ *
+ *
+ * 定义事务索引，为已中止事务（Aborted Transcation）保存重要的元数据信息。
+ * 只有启用 Kafka 事务后，这个索引才有可能出现。
+ *
+ *
  * Licensed to the Apache Software Foundation (ASF) under one or more
  * contributor license agreements. See the NOTICE file distributed with
  * this work for additional information regarding copyright ownership.

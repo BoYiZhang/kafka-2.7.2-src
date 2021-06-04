@@ -30,8 +30,31 @@ import kafka.utils.{CoreUtils, Logging}
 import org.apache.kafka.common.utils.{ByteBufferUnmapper, OperatingSystem, Utils}
 
 /**
+ *
+ *
+ * 它定义了最顶层的抽象类，这个类封装了所有索引类型的公共操作。
+ *
  * The abstract index class which holds entry format agnostic methods.
  *
+ *
+ *
+ *   1.索引文件（file）。每个索引对象在磁盘上都对应了一个索引文件。你可能注意到了，这
+              个字段是 var 型，说明它是可以被修改的。难道索引对象还能动态更换底层的索引文件
+              吗？是的。自 1.1.0 版本之后，Kafka 允许迁移底层的日志路径，所以，索引文件自然要
+              是可以更换的。
+
+     2.起始位移值（baseOffset）。索引对象对应日志段对象的起始位移值。举个例子，如果
+                你查看 Kafka 日志路径的话，就会发现，日志文件和索引文件都是成组出现的。比如
+                说，如果日志文件是 00000000000000000123.log，正常情况下，一定还有一组索引文
+                件 00000000000000000123.index、00000000000000000123.timeindex 等。这里
+                的“123”就是这组文件的起始位移值，也就是 baseOffset 值。
+
+    3.索引文件最大字节数（maxIndexSize）。它控制索引文件的最大长度。Kafka 源码传入
+              该参数的值是 Broker 端参数 segment.index.bytes 的值，即 10MB。这就是在默认情
+              况下，所有 Kafka 索引文件大小都是 10MB 的原因。
+
+    4. 索引文件打开方式（writable）。“True”表示以“读写”方式打开，“False”表示以“只读”方式打开。
+
  * @param _file The index file
  * @param baseOffset the base offset of the segment that this index is corresponding to.
  * @param maxIndexSize The maximum index size in bytes.
@@ -43,6 +66,10 @@ abstract class AbstractIndex(@volatile private var _file: File, val baseOffset: 
   // Length of the index file
   @volatile
   private var _length: Long = _
+
+  // entrySize 来表示不同索引项的大小
+  // 对于 OffsetIndex 而言，该值就是 8；
+  // 对于 TimeIndex 而言，该值是 12
   protected def entrySize: Int
 
   /*
@@ -101,37 +128,52 @@ abstract class AbstractIndex(@volatile private var _file: File, val baseOffset: 
    In there future, we may use a backend thread to periodically touch the entire warm section. So that, we can
    1) support larger warm section
    2) make sure the warm section of low QPS topic-partitions are really warm.
- */
+  */
   protected def _warmEntries: Int = 8192 / entrySize
 
   protected val lock = new ReentrantLock
 
   @volatile
   protected var mmap: MappedByteBuffer = {
+    // 第1步：创建索引文件
     val newlyCreated = file.createNewFile()
+    // 第2步：以writable指定的方式（读写方式或只读方式）打开索引文件
     val raf = if (writable) new RandomAccessFile(file, "rw") else new RandomAccessFile(file, "r")
     try {
       /* pre-allocate the file if necessary */
       if(newlyCreated) {
+        // 预设的索引文件大小不能太小，如果连一个索引项都保存不了，直接抛出异常
         if(maxIndexSize < entrySize)
           throw new IllegalArgumentException("Invalid max index size: " + maxIndexSize)
+        // 第3步：设置索引文件长度，roundDownToExactMultiple 计算的是不超过maxIndexSize的最大整数倍entrySize
+        //       比如maxIndexSize=1234567，entrySize=8，那么调整后的文件长度为1234560
         raf.setLength(roundDownToExactMultiple(maxIndexSize, entrySize))
       }
 
+
       /* memory-map the file */
+
+      // 第4步：更新索引长度字段_length
       _length = raf.length()
+
+      // 第5步：创建MappedByteBuffer对象
       val idx = {
         if (writable)
           raf.getChannel.map(FileChannel.MapMode.READ_WRITE, 0, _length)
         else
           raf.getChannel.map(FileChannel.MapMode.READ_ONLY, 0, _length)
       }
+
+      // 第6步：如果是新创建的索引文件，将MappedByteBuffer对象的当前位置置成0
+      // 如果索引文件已存在，将MappedByteBuffer对象的当前位置设置成最后一个索引项所在的位置
       /* set the position in the index for the next entry */
       if(newlyCreated)
         idx.position(0)
       else
         // if this is a pre-existing index, assume it is valid and set position to last entry
         idx.position(roundDownToExactMultiple(idx.limit(), entrySize))
+
+      // 第7步：返回创建的MappedByteBuffer对象
       idx
     } finally {
       CoreUtils.swallow(raf.close(), AbstractIndex)
@@ -139,16 +181,22 @@ abstract class AbstractIndex(@volatile private var _file: File, val baseOffset: 
   }
 
   /**
+   * 如果我们要计算索引文件最多能容纳多少个索引项，只要定义下面的变量就行了
+   *
    * The maximum number of entries this index can hold
    */
   @volatile
   private[this] var _maxEntries: Int = mmap.limit() / entrySize
 
-  /** The number of entries in this index */
+  /**
+   * 如果我们要计算索引对象中当前有多少个索引项，那么只需要执行下列计算即可
+   *
+   * The number of entries in this index */
   @volatile
   protected var _entries: Int = mmap.position() / entrySize
 
   /**
+   * 来判断当前索引文件是否已经写满
    * True iff there are no more slots available in this index
    */
   def isFull: Boolean = _entries >= _maxEntries
@@ -291,11 +339,14 @@ abstract class AbstractIndex(@volatile private var _file: File, val baseOffset: 
   }
 
   /**
+   * 用于将一个 Long 型的位移值转换成相对位移
    * Get offset relative to base offset of this index
    * @throws IndexOffsetOverflowException
    */
   def relativeOffset(offset: Long): Int = {
+
     val relativeOffset = toRelative(offset)
+    // 如果无法转换成功（比如差值超过了整型表示范围)，则抛出异常
     if (relativeOffset.isEmpty)
       throw new IndexOffsetOverflowException(s"Integer overflow for offset: $offset (${file.getAbsoluteFile})")
     relativeOffset.get
@@ -373,9 +424,11 @@ abstract class AbstractIndex(@volatile private var _file: File, val baseOffset: 
    */
   private def indexSlotRangeFor(idx: ByteBuffer, target: Long, searchEntity: IndexSearchEntity): (Int, Int) = {
     // check if the index is empty
+    // 第1步：如果当前索引为空，直接返回<-1,-1>对
     if(_entries == 0)
       return (-1, -1)
 
+    // 封装原版的二分查找算法
     def binarySearch(begin: Int, end: Int) : (Int, Int) = {
       // binary search for the entry
       var lo = begin
@@ -394,16 +447,23 @@ abstract class AbstractIndex(@volatile private var _file: File, val baseOffset: 
       (lo, if (lo == _entries - 1) -1 else lo + 1)
     }
 
+    // 第3步：确认热区首个索引项位于哪个槽。_warmEntries就是所谓的分割线，目前固定为8
+    // 如果是OffsetIndex，_warmEntries = 8192 / 8 = 1024，即第1024个槽
+    // 如果是TimeIndex，_warmEntries = 8192 / 12 = 682，即第682个槽
     val firstHotEntry = Math.max(0, _entries - 1 - _warmEntries)
+
+    // 第4步：判断target位移值在热区还是冷区
     // check if the target offset is in the warm section of the index
     if(compareIndexEntry(parseEntry(idx, firstHotEntry), target, searchEntity) < 0) {
       return binarySearch(firstHotEntry, _entries - 1)
     }
 
+    // 第5步：确保target位移值不能小于当前最小位移值
     // check if the target offset is smaller than the least offset
     if(compareIndexEntry(parseEntry(idx, 0), target, searchEntity) > 0)
       return (-1, 0)
 
+    // 第6步：如果在冷区，搜索冷区
     binarySearch(0, firstHotEntry)
   }
 
@@ -420,12 +480,23 @@ abstract class AbstractIndex(@volatile private var _file: File, val baseOffset: 
    */
   private def roundDownToExactMultiple(number: Int, factor: Int) = factor * (number / factor)
 
+  /**
+   * relativeOffset 方法调用了父类的 toRelative 方法执行真正的转换
+   *
+   * @param offset
+   * @return
+   */
   private def toRelative(offset: Long): Option[Int] = {
+    // 第一步是计算给定的 offset 值与 baseOffset 的差值；
     val relativeOffset = offset - baseOffset
+    // 第二步是校验该差值 不能是负数或不能超过整型表示范围。
     if (relativeOffset < 0 || relativeOffset > Int.MaxValue)
+      // 否则就返回 None 表示转换失败
       None
-    else
+    else {
+      // 如果校验通过，就直接返回该差值作为相对位移值
       Some(relativeOffset.toInt)
+    }
   }
 
 }

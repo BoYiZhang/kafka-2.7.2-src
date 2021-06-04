@@ -50,7 +50,7 @@ public class StickyPartitionCache {
         // 获取 topic的所有分区.
         List<PartitionInfo> partitions = cluster.partitionsForTopic(topic);
 
-        // 湖获取的老的分区..
+        // 缓存中获取的老的分区..
         Integer oldPart = indexCache.get(topic);
         Integer newPart = oldPart;
         // Check that the current sticky partition for the topic is either not set or that the partition that 

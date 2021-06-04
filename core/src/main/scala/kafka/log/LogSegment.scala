@@ -36,6 +36,22 @@ import scala.jdk.CollectionConverters._
 import scala.math._
 
 /**
+ *
+ *
+ * 日志和索引。
+ *
+ * 这里的索引泛指广义的索引文件。
+ * 每个日志段都有一个起始位移值（Base Offset），
+ * 而该位移值是此日志段所有消息中最小的位移值，同时，该值却又比前面任何日志段中消息的位移值都大。
+ *
+ *
+ * 一个日志段包含消息日志文件、位移索引文件、时间戳索引文件、已中止事务索引文件等
+ *
+ *
+ *
+ *
+ *
+ *
  * A segment of the log. Each segment has two components: a log and an index. The log is a FileRecords containing
  * the actual messages. The index is an OffsetIndex that maps from logical offsets to physical file positions. Each
  * segment has a base offset which is an offset <= the least offset of any message in this segment and > any offset in
@@ -53,12 +69,27 @@ import scala.math._
  * @param time The time instance
  */
 @nonthreadsafe
-class LogSegment private[log] (val log: FileRecords,
+class LogSegment private[log] (val log: FileRecords,  //  FileRecords 就是实际保存 Kafka 消息的对象
                                val lazyOffsetIndex: LazyIndex[OffsetIndex],
                                val lazyTimeIndex: LazyIndex[TimeIndex],
                                val txnIndex: TransactionIndex,
+
+                               // 每个日志段对象保存自己的起始位移 baseOffset
+                               // 磁盘上看到的文件名就是 baseOffset 的值。
+                               // 每个 LogSegment 对象实例一旦被创建，它的起始位移就是固定的了，不能再被更改。
                                val baseOffset: Long,
+
+                               // Broker 端参数 log.index.interval.bytes 值，
+                               // 它控制了日志段对象新增索引项的频率。
+                               // 默认情况下，日志段至少新写入 4KB 的消息数据才会新增一条索引项。
                                val indexIntervalBytes: Int,
+
+                               // 而 rollJitterMs 是日志段对象新增倒计时的“扰动值”
+                               // 因为目前 Broker 端日 志段新增倒计时是全局设置，
+                               // 这就是说，在未来的某个时刻可能同时创建多个日志段对象，
+                               // 这将极大地增加物理磁盘 I/O 压力。
+                               // 有了 rollJitterMs 值的干扰，每个新增日志段在创建
+                               // 时会彼此岔开一小段时间，这样可以缓解物理磁盘的 I/O 负载瓶颈。
                                val rollJitterMs: Long,
                                val time: Time) extends Logging {
 
@@ -128,6 +159,14 @@ class LogSegment private[log] (val log: FileRecords,
   }
 
   /**
+   *
+   * 写入消息的具体操作
+   *
+   * append 方法接收 4 个参数，分别表示待
+   *    写入消息批次中消息的最大位移值、
+   *    最大时间戳、
+   *    最大时间戳对应消息的位移
+   *    真正要写入的消息集合。
    * Append the given messages starting with the given offset. Add
    * an entry to the index if needed.
    *
@@ -141,10 +180,16 @@ class LogSegment private[log] (val log: FileRecords,
    * @throws LogSegmentOffsetOverflowException if the largest offset causes index offset overflow
    */
   @nonthreadsafe
-  def append(largestOffset: Long,
+  def append(largestOffset: Long, // 写入消息批次中消息的最大位移值、
+             // 最大时间戳、
              largestTimestamp: Long,
+             // 最大时间戳对应消息的位移
              shallowOffsetOfMaxTimestamp: Long,
+             // 真正要写入的消息集合。
              records: MemoryRecords): Unit = {
+
+    // 在源码中，首先调用 log.sizeInBytes 方法判断该日志段是否为空，如果是空的话，
+    //  Kafka需要记录要写入消息集合的最大时间戳，并将其作为后面新增日志段倒计时的依据。
     if (records.sizeInBytes > 0) {
       trace(s"Inserting ${records.sizeInBytes} bytes at end offset $largestOffset at position ${log.sizeInBytes} " +
             s"with largest timestamp $largestTimestamp at shallow offset $shallowOffsetOfMaxTimestamp")
@@ -152,16 +197,41 @@ class LogSegment private[log] (val log: FileRecords,
       if (physicalPosition == 0)
         rollingBasedTimestamp = Some(largestTimestamp)
 
+      // 代码调用 ensureOffsetInRange 方法确保输入参数最大位移值是合法的。那怎么判断是不
+      //是合法呢？标准就是看它与日志段起始位移的差值是否在整数范围内，即 largestOffset -
+      //baseOffset 的值是不是 介于 [0，Int.MAXVALUE] 之间。在极个别的情况下，这个差值可
+      //能会越界，这时， append 方法就会抛出异常，阻止后续的消息写入。一旦你碰到这个问
+      //题，你需要做的是升级你的 Kafka 版本，因为这是由已知的 Bug 导致的。
       ensureOffsetInRange(largestOffset)
 
+
+
       // append the messages
+      //  append 方法调用 FileRecords 的 append 方法执行真正的写入。
       val appendedBytes = log.append(records)
+
+
+
+
       trace(s"Appended $appendedBytes to ${log.file} at end offset $largestOffset")
       // Update the in memory max timestamp and corresponding offset.
+
+
+      // 更新日志段的最大时间戳以及最大时间戳所属消息的位移值属性。
+      // 每个日志 段都要保存当前最大时间戳信息和所属消息的位移信息。
+
+      // 时间戳索引项保存时间戳与消息位移的对应关系。
       if (largestTimestamp > maxTimestampSoFar) {
         maxTimestampSoFar = largestTimestamp
         offsetOfMaxTimestampSoFar = shallowOffsetOfMaxTimestamp
       }
+
+
+      // 更新索引项和写入的字节数了。
+      // 日志段每写入4KB 数据就要写入一个索引项。
+      // 当已写入字节数超过了 4KB 之后，append 方法会调用索
+      // 引对象的 append 方法新增索引项，同时清空已写入字节数，以备下次重新累积计算。
+
       // append an entry to the index (if needed)
       if (bytesSinceLastIndexEntry > indexIntervalBytes) {
         offsetIndex.append(largestOffset, physicalPosition)
@@ -276,6 +346,9 @@ class LogSegment private[log] (val log: FileRecords,
   }
 
   /**
+   *
+   * 读取日志段
+   *
    * Read a message set from this segment beginning with the first offset >= startOffset. The message set will include
    * no more than maxSize bytes and will end before maxOffset if a maxOffset is specified.
    *
@@ -288,13 +361,27 @@ class LogSegment private[log] (val log: FileRecords,
    *         or null if the startOffset is larger than the largest offset in this log
    */
   @threadsafe
-  def read(startOffset: Long,
+  def read(startOffset: Long, // startOffset：要读取的第一条消息的位移；
+           // maxSize：能读取的最大字节数；
            maxSize: Int,
+           // maxPosition ：能读到的最大文件位置；
            maxPosition: Long = size,
+           // minOneMessage：是否允许在消息体过大时至少返回第一条消息
+           // 当这个参数为 true 时，即使出现消息体 字节数超过了 maxSize 的情形，
+           // read 方法依然能返回至少一条消息。
+           // 引入这个参数主要是为了确保不出现消费饿死的情况
            minOneMessage: Boolean = false): FetchDataInfo = {
     if (maxSize < 0)
       throw new IllegalArgumentException(s"Invalid max size $maxSize for log read from segment $log")
 
+    // 第一步是调用 translateOffset 方法定位要读取的起始文件位置 （startPosition）。
+    // 输入参数 startOffset 仅仅是位移值，Kafka 需要根据索引信息找到对应的物理文件位置才能开始读取消息
+    // 待确定了读取起始位置，日志段代码需要根据这部分信息以及 maxSize 和 maxPosition 参数共同计算要读取的总字节数。
+
+    // 举个例子，假设 maxSize=100，maxPosition=300，
+    // startPosition=250，那么 read 方法只能读取 50 字节，因为 maxPosition -
+    // startPosition = 50。我们把它和 maxSize 参数相比较，其中的最小值就是最终能够读取
+    // 的总字节数
     val startOffsetAndSize = translateOffset(startOffset)
 
     // if the start position is already off the end of the log, return null
@@ -315,6 +402,8 @@ class LogSegment private[log] (val log: FileRecords,
     // calculate the length of the message set to read based on whether or not they gave us a maxOffset
     val fetchSize: Int = min((maxPosition - startPosition).toInt, adjustedMaxSize)
 
+
+    // [重要] 从指定位置读取指定大小的消息集合
     FetchDataInfo(offsetMetadata, log.slice(startPosition, fetchSize),
       firstEntryIncomplete = adjustedMaxSize < startOffsetAndSize.size)
   }
@@ -323,6 +412,27 @@ class LogSegment private[log] (val log: FileRecords,
      offsetIndex.fetchUpperBoundOffset(startOffsetPosition, fetchSize).map(_.offset)
 
   /**
+   *
+   *  Broker 重启后恢复日志段的操作逻辑。
+   *
+   *  Broker 在启动时会从磁盘上加载所有日志段信息到内存中，并创建相应的 LogSegment 对象实例。
+   *
+   *  recover 开始时，代码依次调用索引对象的 reset 方法清空所有的索引文件，
+   *  之后会开始遍历日志段中的所有消息集合或消息批次（RecordBatch）。
+   *  对于读取到的每个消息集合，日志段必须要确保它们是合法的，这主要体现在两个方面：
+   *  1. 该集合中的消息必须要符合 Kafka 定义的二进制格式；
+   *  2. 该集合中最后一条消息的位移值不能越界，即它与日志段起始位移的差值必须是一个正整数值。
+   *
+   *
+   * 校验完消息集合之后，代码会更新遍历过程中观测到的最大时间戳以及所属消息的位移值。
+   * 同样，这两个数据用于后续构建索引项。再之后就是不断累加当前已读取的消息字节数，并根据该值有条件地写入索引项。
+   * 最后是更新事务型 Producer 的状态以及 Leader Epoch 缓存。
+   *
+   * 遍历执行完成后，Kafka 会将日志段当前总字节数和刚刚累加的已读取字节数进行比较，
+   * 如果发现前者比后者大，说明日志段写入了一些非法消息，需要执行截断操作，
+   * 将日志段大小调整回合法的数值。
+   * 同时， Kafka 还必须相应地调整索引文件的大小。把这些都做完之后，日志段恢复的操作也就宣告结束了
+   *
    * Run recovery on the given segment. This will rebuild the index from the log file and lop off any invalid bytes
    * from the end of the log and index.
    *
@@ -331,6 +441,7 @@ class LogSegment private[log] (val log: FileRecords,
    * @param leaderEpochCache Optionally a cache for updating the leader epoch during recovery.
    * @return The number of bytes truncated from the log
    * @throws LogSegmentOffsetOverflowException if the log segment contains an offset that causes the index offset to overflow
+   *
    */
   @nonthreadsafe
   def recover(producerStateManager: ProducerStateManager, leaderEpochCache: Option[LeaderEpochFileCache] = None): Int = {
@@ -679,6 +790,7 @@ object LogSegment {
   }
 }
 
+// LogFlushStats 结尾有个 Stats，它是做统计用的，主要负责为 日志落盘进行计时。
 object LogFlushStats extends KafkaMetricsGroup {
   val logFlushTimer = new KafkaTimer(newTimer("LogFlushRateAndTimeMs", TimeUnit.MILLISECONDS, TimeUnit.SECONDS))
 }

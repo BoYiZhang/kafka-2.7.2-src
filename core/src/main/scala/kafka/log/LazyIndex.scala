@@ -27,6 +27,9 @@ import kafka.utils.threadsafe
 import org.apache.kafka.common.utils.Utils
 
 /**
+ *
+ * 它定义了 AbstractIndex 上的一个包装类，实现索引项延迟加载。这个类主要是为了提高性能
+ *
   * A wrapper over an `AbstractIndex` instance that provides a mechanism to defer loading
   * (i.e. memory mapping) the underlying index until it is accessed for the first time via the
   * `get` method.
