@@ -316,7 +316,7 @@ class RaftSocketServer(
     connectionQuotas: ConnectionQuotas,
     listenerName: ListenerName,
     securityProtocol: SecurityProtocol,
-    memoryPool: MemoryPool,
+    memoryPool: MemoryPool
   ): Processor = {
     new Processor(id,
       time,

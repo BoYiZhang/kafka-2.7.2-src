@@ -425,7 +425,7 @@ class SocketServer(val config: KafkaConfig,
       metrics,
       credentialProvider,
       memoryPool,
-      logContext,
+      logContext
     )
   }
 

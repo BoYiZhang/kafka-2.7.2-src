@@ -182,7 +182,7 @@ object ReplicaManager {
   @volatile var DefaultIsrPropagationConfig: IsrChangePropagationConfig = IsrChangePropagationConfig(
     checkIntervalMs = 2500,
     lingerMs = 5000,
-    maxDelayMs = 60000,
+    maxDelayMs = 60000
   )
 }
 

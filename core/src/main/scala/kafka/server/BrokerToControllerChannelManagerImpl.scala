@@ -155,7 +155,7 @@ class BrokerToControllerRequestThread(networkClient: KafkaClient,
       val request = RequestAndCompletionHandler(
         activeController.get,
         topRequest.request,
-        handleResponse(topRequest),
+        handleResponse(topRequest)
         )
       requestsToSend.enqueue(request)
     }

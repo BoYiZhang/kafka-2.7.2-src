@@ -41,6 +41,7 @@ class KafkaServerStartable(val staticServerConfig: KafkaConfig, reporters: Seq[K
   def this(serverConfig: KafkaConfig) = this(serverConfig, Seq.empty)
 
   def startup(): Unit = {
+    // 启动
     try server.startup()
     catch {
       case _: Throwable =>
