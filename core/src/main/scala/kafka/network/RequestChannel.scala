@@ -44,7 +44,12 @@ import scala.collection.mutable
 import scala.jdk.CollectionConverters._
 import scala.reflect.ClassTag
 
-// 本质: 一个不断接收外部请求、处理请求，然后发送处理结果的 Java 进程。
+// kafka本质: 一个不断接收外部请求、处理请求，然后发送处理结果的 Java 进程。
+
+/**
+ * 当前 Kafka Broker 端所有网络线程都是在RequestChannel 中维护的。
+ */
+
 object RequestChannel extends Logging {
   private val requestLogger = Logger("kafka.request.logger")
 
@@ -316,58 +321,172 @@ object RequestChannel extends Logging {
 
   }
 
+
+  /**
+   *
+   * 定义 Response 的抽象基类。每个 Response 对象都包含了对应的Request 对象。
+   * 这个类里最重要的方法是 onComplete 方法，用来实现每类 Response被处理后需要执行的回调逻辑。
+   *
+   * 这个抽象基类只有一个属性字段：request。
+   * 这就是说，每个 Response 对象都要保存它对应的 Request 对象。
+   *
+   *
+   *
+   * @param request
+   */
   abstract class Response(val request: Request) {
 
     def processor: Int = request.processor
 
     def responseString: Option[String] = Some("")
 
+    // onComplete 方法是调用指定回调逻辑的地方。
     def onComplete: Option[Send => Unit] = None
 
     override def toString: String
   }
 
-  /** responseAsString should only be defined if request logging is enabled */
+  /**
+   * Kafka 大多数 Request 处理完成后都需要执行一段回调逻辑，
+   * SendResponse 就是保存返回结果的 Response 子类。
+   *
+   * SendResponse 类继承了 Response 父类，并重新定义了 onComplete 方法。
+   *
+   * 里面最重要的字段是onCompletionCallback，即指定处理完成之后的回调逻辑。
+   *
+   *
+   *
+   * responseAsString should only be defined if request logging is enabled
+   * */
   class SendResponse(request: Request,
                      val responseSend: Send,
                      val responseAsString: Option[String],
                      val onCompleteCallback: Option[Send => Unit]) extends Response(request) {
     override def responseString: Option[String] = responseAsString
 
+
+    /**
+     * Scala 中的 Unit 类似于 Java 中的 void，
+     * 而“Send => Unit”表示一个方法。
+     *
+     * 这个方法接收一个 Send 类实例，
+     * 然后执行一段代码逻辑。Scala 是函数式编程语言，
+     * 函数在 Scala 中是“一等公民”，
+     * 因此，你可以把一个函数作为一个参数传给另一个函数，
+     * 也可以把函数作为结果返回。
+     *
+     * 这里的 onComplete 方法就应用了第二种用法，也就是把函数赋值给另一个函数，并作为结果返回。
+     * 这样做的好处在于，你可以灵活地变更 onCompleteCallback 来实现不同的回调逻辑。
+     * @return
+     */
     override def onComplete: Option[Send => Unit] = onCompleteCallback
 
     override def toString: String =
       s"Response(type=Send, request=$request, send=$responseSend, asString=$responseAsString)"
   }
 
+  /**
+   * 有些 Request 处理完成后无需单独执行额外的回调逻辑。
+   * NoResponse就是为这类 Response 准备的。
+   *
+   * @param request
+   */
   class NoOpResponse(request: Request) extends Response(request) {
     override def toString: String =
       s"Response(type=NoOp, request=$request)"
   }
 
+  /**
+   * 用于出错后需要关闭 TCP 连接的场景，
+   * 此时返回CloseConnectionResponse 给 Request 发送方，
+   * 显式地通知它关闭连接。
+   *
+   * @param request
+   */
   class CloseConnectionResponse(request: Request) extends Response(request) {
     override def toString: String =
       s"Response(type=CloseConnection, request=$request)"
   }
 
+  /**
+   * 用于通知 Broker 的 Socket Server 组件某个 TCP 连接通信通道开始被限流（throttling）。
+   * @param request
+   */
   class StartThrottlingResponse(request: Request) extends Response(request) {
     override def toString: String =
       s"Response(type=StartThrottling, request=$request)"
   }
 
+  /**
+   * 与 StartThrottlingResponse 对应，通知 Broker 的SocketServer 组件某个 TCP 连接通信通道的限流已结束
+   * @param request
+   */
   class EndThrottlingResponse(request: Request) extends Response(request) {
     override def toString: String =
       s"Response(type=EndThrottling, request=$request)"
   }
 }
 
+/**
+ * RequestChannel 类实现了 KafkaMetricsGroup trait，
+ * 后者封装了许多实用的指标监控方法，
+ * 比如，newGauge 方法用于创建数值型的监控指标，
+ * newHistogram 方法用于创建直方图型的监控指标。
+ *
+ * 就 RequestChannel 类本身的主体功能而言，它定义了最核心的 3 个属性：
+ *  1. requestQueue
+ *  2. queueSize
+ *  3. processors
+ *
+ *
+ * @param queueSize
+ * @param metricNamePrefix
+ * @param time
+ */
 class RequestChannel(val queueSize: Int,
                      val metricNamePrefix : String,
                      time: Time) extends KafkaMetricsGroup {
   import RequestChannel._
   val metrics = new RequestChannel.Metrics
+
+  /**
+   * 每个 RequestChannel 对象实例创建时，会定义一个队列来保存 Broker 接收到的各类请求，
+   * 这个队列被称为请求队列或 Request 队列 [requestQueue]。
+   *
+   * Kafka 使用 Java 提供的阻塞队列ArrayBlockingQueue 实现这个请求队列，
+   * 并利用它天然提供的线程安全性来保证多个线程能够并发安全高效地访问请求队列。
+   *
+   *
+   *
+   * 而字段 queueSize 就是 Request 队列的最大长度。
+   *
+   * 当 Broker 启动时，
+   * SocketServer 组件会创建 RequestChannel 对象，
+   * 并把 Broker 端参数 queued.max.requests 赋值给queueSize。
+   * 因此，在默认情况下，每个 RequestChannel 上的队列长度是 500。
+   *
+   *  queueSize :
+   *
+   *
+   */
   private val requestQueue = new ArrayBlockingQueue[BaseRequest](queueSize)
+
+
+  /**
+   * 字段 processors 封装的是 RequestChannel 下辖的 Processor 线程池。
+   * 每个 Processor线程负责具体的请求处理逻辑。
+   *
+   * Processor 线程池 用 Java 的ConcurrentHashMap 数据结构去保存的。
+   * Map 中的 Key 就是前面我们说的 processor序号，
+   * 而 Value 则对应具体的 Processor 线程对象
+   *
+   */
   private val processors = new ConcurrentHashMap[Int, Processor]()
+
+
+  /**
+   * 度量相关
+   */
   val requestQueueSizeMetricName = metricNamePrefix.concat(RequestQueueSizeMetric)
   val responseQueueSizeMetricName = metricNamePrefix.concat(ResponseQueueSizeMetric)
 
@@ -379,27 +498,62 @@ class RequestChannel(val queueSize: Int,
     }
   })
 
+
+  /**
+   * 每当 Broker 启动时，它都会调用 addProcessor 方法，
+   * 向RequestChannel 对象添加 num.network.threads 个 Processor 线程
+   * @param processor
+   */
   def addProcessor(processor: Processor): Unit = {
+
+    // 添加Processor到Processor线程池
     if (processors.putIfAbsent(processor.id, processor) != null)
       warn(s"Unexpected processor with processorId ${processor.id}")
 
     newGauge(responseQueueSizeMetricName, () => processor.responseQueueSize,
+      // 为给定Processor对象创建对应的监控指标
       Map(ProcessorMetricTag -> processor.id.toString))
   }
 
+  /**
+   * Kafka 允许你动态地修改此参数值。比如，Broker 启动时指定 num.network.threads 为 8，
+   * 之后你通过 kafka-configs 命令将其修改为 3。
+   * 显然，这个操作会减少 Processor 线程池中的线程数量。
+   * 在这个场景下，removeProcessor 方法会被调用.
+   *
+   * @param processorId
+   */
   def removeProcessor(processorId: Int): Unit = {
+    // 从Processor线程池中移除给定Processor线程
     processors.remove(processorId)
     removeMetric(responseQueueSizeMetricName, Map(ProcessorMetricTag -> processorId.toString))
   }
 
-  /** Send a request to be handled, potentially blocking until there is room in the queue for the request */
+  /**
+   * 发送request
+   *
+   * Send a request to be handled, potentially blocking until there is room in the queue for the request */
   def sendRequest(request: RequestChannel.Request): Unit = {
+    // 所谓的发送 Request，仅仅是将 Request 对象放置在 Request 队列中而已
     requestQueue.put(request)
   }
 
-  /** Send a response back to the socket server to be sent over the network */
+  /**
+   *
+   * 发送 response
+   * sendResponse 方法的逻辑其实非常简单。
+   * 前面的一大段 if 代码块仅仅是构造 Trace 日志要输出的内容。
+   * 根据不同类型的Response，代码需要确定要输出的 Trace 日志内容。
+   * 接着，代码会找出 Response 对象对应的 Processor 线程。
+   * 当 Processor 处理完某个Request 后，会把自己的序号封装进对应的 Response 对象。
+   * 一旦找出了之前是由哪个Processor 线程处理的，代码直接调用该 Processor 的 enqueueResponse 方法，
+   * 将Response 放入 Response 队列中，等待后续发送。
+   *
+   *
+   * Send a response back to the socket server to be sent over the network */
   def sendResponse(response: RequestChannel.Response): Unit = {
 
+    // 构造Trace日志输出字符串
     if (isTraceEnabled) {
       val requestHeader = response.request.header
       val message = response match {
@@ -429,22 +583,41 @@ class RequestChannel(val queueSize: Int,
       case _: StartThrottlingResponse | _: EndThrottlingResponse => ()
     }
 
+    // 找出response对应的Processor线程，即request当初是由哪个Processor线程处理的
     val processor = processors.get(response.processor)
     // The processor may be null if it was shutdown. In this case, the connections
     // are closed, so the response is dropped.
+
+    // 将response对象放置到对应Processor线程的Response队列中
     if (processor != null) {
+
+      // 将 Response 添加到 Response 队列的过程
       processor.enqueueResponse(response)
     }
   }
 
-  /** Get the next request or block until specified time has elapsed */
-  def receiveRequest(timeout: Long): RequestChannel.BaseRequest =
-    requestQueue.poll(timeout, TimeUnit.MILLISECONDS)
+  /**
+   *
+   * 接收 Request , 有 timeout 控制
+   *
+   * 接收Request 则是从队列中取出 Request
+   *
+   * Get the next request or block until specified time has elapsed */
+  def receiveRequest(timeout: Long): RequestChannel.BaseRequest = requestQueue.poll(timeout, TimeUnit.MILLISECONDS)
 
-  /** Get the next request or block until there is one */
-  def receiveRequest(): RequestChannel.BaseRequest =
-    requestQueue.take()
+  /**
+   * 接收 Request  , take 阻塞
+   *
+   * 接收Request 则是从队列中取出 Request
+   *
+   * Get the next request or block until there is one */
+  def receiveRequest(): RequestChannel.BaseRequest = requestQueue.take()
 
+  /**
+   * 用于实现监控项的更新
+   * @param apiKey
+   * @param errors
+   */
   def updateErrorMetrics(apiKey: ApiKeys, errors: collection.Map[Errors, Integer]): Unit = {
     errors.forKeyValue { (error, count) =>
       metrics(apiKey.name).markErrorMeter(error, count)
@@ -468,13 +641,40 @@ object RequestMetrics {
   val consumerFetchMetricName = ApiKeys.FETCH.name + "Consumer"
   val followFetchMetricName = ApiKeys.FETCH.name + "Follower"
 
+  // 每秒处理的 Request 数，用来评估 Broker 的繁忙状态
   val RequestsPerSec = "RequestsPerSec"
+
+  // 计算 Request 在 Request 队列中的平均等候时间，单位是毫秒。
+  // 倘若 Request 在队列的等待时间过长，
+  // 你通常需要增加后端 I/O 线程的数量，来加快队列中 Request 的拿取速度
   val RequestQueueTimeMs = "RequestQueueTimeMs"
+
+  // 计算 Request 实际被处理的时间，单位是毫秒。
+  // 一旦定位到这个监控项的值很大，
+  // 你就需要进一步研究 Request 被处理的逻辑了，
+  // 具体分析到底是哪一步消耗了过多的时间。
   val LocalTimeMs = "LocalTimeMs"
+
+  /**
+   * Kafka 的读写请求（PRODUCE 请求和 FETCH 请求）逻辑涉及等待其他 Broker 操作的步骤。
+   * RemoteTimeMs 计算的，就是等待其他 Broker 完成指定逻辑的时间。
+   * 因为等待的是其他 Broker，因此被称为 Remote Time。
+   *
+   * 这个监控项非常重要！
+   * Kafka 生产环境中设置 acks=all 的 Producer 程序发送消息延时高的主要原因，
+   * 往往就是 Remote Time 高。
+   * 因此，如果你也碰到了这样的问题，不妨先定位一下Remote Time 是不是瓶颈
+   *
+   */
   val RemoteTimeMs = "RemoteTimeMs"
   val ThrottleTimeMs = "ThrottleTimeMs"
   val ResponseQueueTimeMs = "ResponseQueueTimeMs"
   val ResponseSendTimeMs = "ResponseSendTimeMs"
+  /**
+   * 计算 Request 被处理的完整流程时间。这是最实用的监控指标，没有之一！
+   * 毕竟，我们通常都是根据 TotalTimeMs 来判断系统是否出现问题的。
+   * 一旦发现了问题，我们才会利用前面的几个监控项进一步定位问题的原因
+   */
   val TotalTimeMs = "TotalTimeMs"
   val RequestBytes = "RequestBytes"
   val MessageConversionsTimeMs = "MessageConversionsTimeMs"
