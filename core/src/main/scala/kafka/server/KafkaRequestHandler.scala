@@ -35,8 +35,34 @@ trait ApiRequestHandler {
 }
 
 /**
+ *
+ * KafkaRequestHandler 是一个 Runnable 对象，因此，你可以把它当成是一个线程。
+ *
+ * 请求处理线程类。每个请求处理线程实例，
+ * 负责从SocketServer 的 RequestChannel 的请求队列中获取请求对象，并进行处理。
+ *
+ * 关键字段说明 :
+ *   id: I/O线程序号
+ *   brokerId：所在Broker序号，即broker.id值
+ *   totalHandlerThreads：I/O线程池大小
+ *   requestChannel：请求处理通道
+ *   apis：KafkaApis类，用于真正实现请求处理逻辑的类
+ *
  * A thread that answers kafka requests.
+ *
  */
+
+//  id：            请求处理线程的序号，类似于 Processor 线程的 ID 序号，仅仅用于标识这是线程池中的第几个线程。
+//  brokerId：      Broker 序号，用于标识这是哪个 Broker 上的请求处理线程。
+//  requestChannel：SocketServer 中的请求通道对象。
+//      KafkaRequestHandler对象为什么要定义这个字段呢？
+//      我们说过，它是负责处理请求的类，那请求保存在什么地方 呢？
+//      实际上，请求恰恰是保存在 RequestChannel 中的请求队列中，因此，Kafka 在构 造 KafkaRequestHandler 实例时，
+//      必须关联 SocketServer 组件中的 RequestChannel 实例，
+//      也就是说，要让 I/O 线程能够找到请求被保存的地方。
+//  apis：这是一个KafkaApis 类。
+//        如果说KafkaRequestHandler是真正处理请求的，
+//        那么，KafkaApis 类就是真正执行请求处理逻辑的地方。
 class KafkaRequestHandler(id: Int,
                           brokerId: Int,
                           val aggregateIdleMeter: Meter,
@@ -49,6 +75,8 @@ class KafkaRequestHandler(id: Int,
   @volatile private var stopped = false
 
   def run(): Unit = {
+
+    // 只要该线程尚未关闭，循环运行处理逻辑
     while (!stopped) {
       // We use a single meter for aggregate idle percentage for the thread pool.
       // Since meter is calculated as total_recorded_value / time_window and
@@ -56,31 +84,45 @@ class KafkaRequestHandler(id: Int,
       // time should be discounted by # threads.
       val startSelectTime = time.nanoseconds
 
+      // 从请求队列中获取下一个待处理的请求
       val req = requestChannel.receiveRequest(300)
       val endTime = time.nanoseconds
+
+      // 统计线程空闲时间
       val idleTime = endTime - startSelectTime
+
+      // 更新线程空闲百分比指标
       aggregateIdleMeter.mark(idleTime / totalHandlerThreads.get)
 
       req match {
+        // 关闭线程请求
         case RequestChannel.ShutdownRequest =>
           debug(s"Kafka request handler $id on broker $brokerId received shut down command")
+          // 关闭线程
           shutdownComplete.countDown()
           return
 
+        // 普通请求
         case request: RequestChannel.Request =>
           try {
             request.requestDequeueTimeNanos = endTime
             trace(s"Kafka request handler $id on broker $brokerId handling request $request")
+
+            // 由KafkaApis.handle方法执行相应处理逻辑
             apis.handle(request)
           } catch {
+            // 如果出现严重错误，立即关闭线程
             case e: FatalExitError =>
               shutdownComplete.countDown()
               Exit.exit(e.statusCode)
+            // 如果是普通异常，记录错误日志
             case e: Throwable => error("Exception when handling request", e)
           } finally {
+            // 释放请求对象占用的内存缓冲区资源
             request.releaseBuffer()
           }
 
+        // 继续
         case null => // continue
       }
     }
@@ -97,6 +139,38 @@ class KafkaRequestHandler(id: Int,
 
 }
 
+
+/**
+ * 请求处理线程池，负责创建、维护、管理和销毁下辖的请求处理线程
+ *
+ *
+ *
+ * @param brokerId
+ * @param requestChannel
+ * @param apis
+ * @param time
+ * @param numThreads
+ * @param requestHandlerAvgIdleMetricName
+ * @param logAndThreadNamePrefix
+ */
+
+// 关键字段说明
+// brokerId：所属Broker的序号，即broker.id值
+// requestChannel：SocketServer组件下的RequestChannel对象
+// api：KafkaApis类，实际请求处理逻辑类
+// numThreads：I/O线程池初始大小
+
+
+//  brokerId：和 KafkaRequestHandler 中的一样，保存 Broker 的序号。
+//  requestChannel：
+//            SocketServer 的请求处理通道，它下辖的请求队列为所有 I/O 线程 所共享。
+//            requestChannel 字段也是 KafkaRequestHandler 类的一个重要属性。
+//  apis：KafkaApis 实例，执行实际的请求处理逻辑。
+//            它同时也是 KafkaRequestHandler 类的一个重要属性。
+//  numThreads：线程池中的初始线程数量。它是 Broker 端参数 num.io.threads 的值。
+//              目前，Kafka 支持动态修改 I/O 线程池的大小，因此，这里的 numThreads 是初始线程 数，
+//              调整后的 I/O 线程池的实际大小可以和 numThreads 不一致。
+
 class KafkaRequestHandlerPool(val brokerId: Int,
                               val requestChannel: RequestChannel,
                               val apis: ApiRequestHandler,
@@ -105,18 +179,31 @@ class KafkaRequestHandlerPool(val brokerId: Int,
                               requestHandlerAvgIdleMetricName: String,
                               logAndThreadNamePrefix : String) extends Logging with KafkaMetricsGroup {
 
+
+
+  // I/O线程池大小
   private val threadPoolSize: AtomicInteger = new AtomicInteger(numThreads)
+
+
   /* a meter to track the average free capacity of the request handlers */
   private val aggregateIdleMeter = newMeter(requestHandlerAvgIdleMetricName, "percent", TimeUnit.NANOSECONDS)
 
   this.logIdent = "[" + logAndThreadNamePrefix + " Kafka Request Handler on Broker " + brokerId + "], "
+
+
+  // I/O线程池
+  // 控制 KafkaRequestHandler 的数量
   val runnables = new mutable.ArrayBuffer[KafkaRequestHandler](numThreads)
   for (i <- 0 until numThreads) {
     createHandler(i)
   }
 
+  // 构建 KafkaRequestHandler
+  // 创建序号为指定id的I/O线程对象，并启动该线程
   def createHandler(id: Int): Unit = synchronized {
+    // 创建KafkaRequestHandler实例并加入到runnables中
     runnables += new KafkaRequestHandler(id, brokerId, aggregateIdleMeter, threadPoolSize, requestChannel, apis, time)
+    // 启动KafkaRequestHandler线程
     KafkaThread.daemon(logAndThreadNamePrefix + "-kafka-request-handler-" + id, runnables(id)).start()
   }
 
@@ -140,11 +227,14 @@ class KafkaRequestHandlerPool(val brokerId: Int,
     for (handler <- runnables)
       handler.initiateShutdown()
     for (handler <- runnables)
+      // 调用awaitShutdown方法等待关闭完成
+      // run方法一旦调用countDown方法，这里将解除等待状态
       handler.awaitShutdown()
     info("shut down completely")
   }
 }
 
+// Broker 端与主题相关的监控指标的管理类
 class BrokerTopicMetrics(name: Option[String]) extends KafkaMetricsGroup {
   val tags: scala.collection.Map[String, String] = name match {
     case None => Map.empty
@@ -261,6 +351,10 @@ class BrokerTopicMetrics(name: Option[String]) extends KafkaMetricsGroup {
   def close(): Unit = metricTypeMap.values.foreach(_.close())
 }
 
+/**
+ * BrokerTopicStats 的伴生对象类，定义 Broker 端与主题相关的监控指标，
+ * 比如常见的 MessagesInPerSec 和 MessagesOutPerSec 等
+ */
 object BrokerTopicStats {
   val MessagesInPerSec = "MessagesInPerSec"
   val BytesInPerSec = "BytesInPerSec"
@@ -286,6 +380,7 @@ object BrokerTopicStats {
   private val valueFactory = (k: String) => new BrokerTopicMetrics(Some(k))
 }
 
+// 定义 Broker 端与主题相关的监控指标的管理操作
 class BrokerTopicStats extends Logging {
   import BrokerTopicStats._
 

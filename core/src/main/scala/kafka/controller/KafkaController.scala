@@ -2375,6 +2375,7 @@ class KafkaController(val config: KafkaConfig,
   override def process(event: ControllerEvent): Unit = {
     try {
       event match {
+        // 依次匹配ControllerEvent事件
         case event: MockEvent =>
           // Used only in test cases
           event.process()
@@ -2563,7 +2564,13 @@ private[controller] class ControllerStats extends KafkaMetricsGroup {
 
 }
 
+// Controller 事件，在源码中对应的就是 ControllerEvent 接口
 sealed trait ControllerEvent {
+  // 每个 ControllerEvent 都定义了一个状态。
+  // 每类 ControllerState 都定义一个 value 值，表示 Controller 状态的序号，从 0 开始
+  // 另外，rateAndTimeMetricName 方法是用于构造 Controller 状态速率的监控指标名称的
+
+  // 多个 ControllerEvent 可能归属于相同的 ControllerState
   def state: ControllerState
   // preempt() is not executed by `ControllerEventThread` but by the main thread.
   def preempt(): Unit

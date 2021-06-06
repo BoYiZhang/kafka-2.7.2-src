@@ -72,6 +72,10 @@ case class ReplicaAssignment private (replicas: Seq[Int],
     s"removingReplicas=${removingReplicas.mkString(",")})"
 }
 
+// 它定义了前面提到的所有元数据信息，以及许多实用的工具方法。
+// 获取集群上所有主题分区对象的 allPartitions 方法、
+// 获取某主题分区副本列表的 partitionReplicaAssignment 方法
+
 class ControllerContext {
   val stats = new ControllerStats
   var offlinePartitionCount = 0
